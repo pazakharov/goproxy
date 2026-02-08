@@ -7,11 +7,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/snail007/goproxy/auth"
-	"github.com/snail007/goproxy/config"
-	"github.com/snail007/goproxy/proxy"
-	"github.com/snail007/goproxy/traffic"
-	"github.com/snail007/goproxy/transport"
+	"github.com/pazakharov/goproxy/auth"
+	"github.com/pazakharov/goproxy/config"
+	"github.com/pazakharov/goproxy/proxy"
+	"github.com/pazakharov/goproxy/traffic"
+	"github.com/pazakharov/goproxy/transport"
 )
 
 // Auto implements the auto-detect proxy service (HTTP + SOCKS5)

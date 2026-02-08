@@ -1,4 +1,4 @@
-module github.com/snail007/goproxy
+module github.com/pazakharov/goproxy
 
 go 1.16
 

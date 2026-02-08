@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/snail007/goproxy/auth"
-	"github.com/snail007/goproxy/config"
-	"github.com/snail007/goproxy/traffic"
-	"github.com/snail007/goproxy/transport"
-	"github.com/snail007/goproxy/utils"
+	"github.com/pazakharov/goproxy/auth"
+	"github.com/pazakharov/goproxy/config"
+	"github.com/pazakharov/goproxy/traffic"
+	"github.com/pazakharov/goproxy/transport"
+	"github.com/pazakharov/goproxy/utils"
 )
 
 // SOCKS5Handler implements SOCKS5 proxy protocol (RFC 1928)

@@ -8,11 +8,12 @@ import (
 	"io"
 	"log"
 	"net"
-	"github.com/snail007/goproxy/utils"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/pazakharov/goproxy/utils"
 )
 
 type TunnelServer struct {

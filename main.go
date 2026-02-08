@@ -2,11 +2,12 @@ package main
 
 import (
 	"fmt"
-	"github.com/snail007/goproxy/services"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/pazakharov/goproxy/services"
 )
 
 const APP_VERSION = "3.0"

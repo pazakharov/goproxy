@@ -6,8 +6,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/snail007/goproxy/services"
-	"github.com/snail007/goproxy/utils"
+	"github.com/pazakharov/goproxy/services"
+	"github.com/pazakharov/goproxy/utils"
 
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 )

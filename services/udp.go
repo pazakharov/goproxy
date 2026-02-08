@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/snail007/goproxy/traffic"
-	"github.com/snail007/goproxy/utils"
+	"github.com/pazakharov/goproxy/traffic"
+	"github.com/pazakharov/goproxy/utils"
 )
 
 type UDP struct {

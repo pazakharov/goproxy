@@ -8,11 +8,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/snail007/goproxy/auth"
-	"github.com/snail007/goproxy/config"
-	"github.com/snail007/goproxy/proxy"
-	"github.com/snail007/goproxy/traffic"
-	"github.com/snail007/goproxy/transport"
+	"github.com/pazakharov/goproxy/auth"
+	"github.com/pazakharov/goproxy/config"
+	"github.com/pazakharov/goproxy/proxy"
+	"github.com/pazakharov/goproxy/traffic"
+	"github.com/pazakharov/goproxy/transport"
 )
 
 // Server is a unified proxy server that can handle multiple protocols
