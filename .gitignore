@@ -2,6 +2,6 @@
 /goproxy
 /go.sum
 /build
-/auth-api
+# /auth-api
 proxy.crt
 proxy.key

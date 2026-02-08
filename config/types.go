@@ -22,11 +22,11 @@ type TLSConfig struct {
 
 // AuthConfig contains authentication settings
 type AuthConfig struct {
-	Users      []string       // user:pass pairs from CLI
-	AuthFile   string         // path to auth file
-	APIURL     string         // external auth API endpoint
-	APITimeout time.Duration  // auth API timeout
-	CacheTTL   time.Duration  // auth cache TTL (0 = disabled)
+	Users      []string      // user:pass pairs from CLI
+	AuthFile   string        // path to auth file
+	APIURL     string        // external auth API endpoint
+	APITimeout time.Duration // auth API timeout
+	CacheTTL   time.Duration // auth cache TTL (0 = disabled)
 }
 
 // UpstreamConfig contains upstream/parent proxy settings
@@ -44,6 +44,7 @@ type HTTPConfig struct {
 	ServerConfig
 	AuthConfig
 	UpstreamConfig
+	TrafficConfig
 	HTTPTimeout time.Duration // check domain blocked timeout
 	Interval    time.Duration // check domain blocked interval
 	Blocked     string        // blocked domain file
@@ -55,4 +56,13 @@ type SOCKS5Config struct {
 	ServerConfig
 	AuthConfig
 	UpstreamConfig
+	TrafficConfig
+}
+
+// TrafficConfig contains traffic reporting settings
+type TrafficConfig struct {
+	URL        string        // traffic reporting HTTP endpoint
+	Mode       string        // normal|fast
+	Interval   time.Duration // reporting interval for fast mode
+	FastGlobal bool          // use single global reporter for fast mode
 }

@@ -1,0 +1,19 @@
+{
+  "name": "goproxy-auth-api",
+  "version": "1.0.0",
+  "description": "External HTTP API authentication service for goproxy with per-user upstream support",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "ts-node server.ts"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.0.0"
+  }
+}

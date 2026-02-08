@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/snail007/goproxy/traffic"
 	"github.com/snail007/goproxy/utils"
 )
 
@@ -26,6 +27,7 @@ type HTTP struct {
 	authClient *http.Client
 	authCache  *utils.AuthCache
 	connSem    chan struct{} // semaphore for limiting concurrent connections
+	reporter   traffic.Reporter
 }
 
 func NewHTTP() Service {
@@ -54,6 +56,19 @@ func (s *HTTP) Start(args interface{}) (err error) {
 		s.connSem = make(chan struct{}, *s.cfg.MaxConns)
 		log.Printf("max concurrent connections limited to %d", *s.cfg.MaxConns)
 	}
+	// Initialize traffic reporter if configured
+	if *s.cfg.TrafficURL != "" {
+		s.reporter = traffic.NewHTTPReporter(
+			*s.cfg.TrafficURL,
+			*s.cfg.TrafficMode,
+			time.Duration(*s.cfg.TrafficInterval)*time.Second,
+			*s.cfg.FastGlobal,
+		)
+		log.Printf("traffic reporter: url=%s, mode=%s", *s.cfg.TrafficURL, *s.cfg.TrafficMode)
+	} else {
+		s.reporter = traffic.NewNopReporter()
+	}
+
 	if *s.cfg.AuthURL != "" {
 		s.authClient = &http.Client{
 			Timeout: time.Duration(*s.cfg.AuthTimeout) * time.Millisecond,
@@ -193,6 +208,25 @@ func (s *HTTP) OutToTCP(useProxy bool, address string, inConn *net.Conn, req *ut
 	outAddr := outConn.RemoteAddr().String()
 	outLocalAddr := outConn.LocalAddr().String()
 
+	// Create traffic session if reporter is configured
+	var session *traffic.Session
+	var stopPeriodic func()
+	if s.reporter != nil {
+		session = traffic.NewSession(
+			"http",
+			inLocalAddr,
+			inAddr,
+			address,
+			"", // username - not easily accessible in legacy handler without parsing auth header
+			outLocalAddr,
+			outAddr,
+			req.Upstream,
+			"", // sniff_domain - not implemented in legacy handler
+		)
+		// Start periodic reporting if in fast mode
+		stopPeriodic = s.reporter.StartPeriodic(session)
+	}
+
 	if req.Upstream != "" {
 		if req.IsHTTPS() {
 			// For HTTPS via upstream: CONNECT already sent in connectViaUpstream
@@ -229,7 +263,19 @@ func (s *HTTP) OutToTCP(useProxy bool, address string, inConn *net.Conn, req *ut
 		}
 		utils.CloseConn(inConn)
 		utils.CloseConn(&outConn)
-	}, func(n int, d bool) {}, 0)
+		// Stop periodic reporting and send final report
+		if stopPeriodic != nil {
+			stopPeriodic()
+		}
+		// For normal mode, explicitly send the report (fast mode already sends in stopPeriodic)
+		if s.reporter != nil && s.reporter.Mode() == "normal" {
+			s.reporter.Report(session)
+		}
+	}, func(n int, d bool) {
+		if session != nil {
+			session.AddBytes(int64(n))
+		}
+	}, 0)
 	if *s.cfg.Debug {
 		log.Printf("conn %s - %s - %s - %s connected [%s]", inAddr, inLocalAddr, outLocalAddr, outAddr, req.Host)
 	}

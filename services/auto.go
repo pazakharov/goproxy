@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"log"
 	"net"
 	"strconv"
@@ -15,8 +16,8 @@ import (
 
 // Auto implements the auto-detect proxy service (HTTP + SOCKS5)
 type Auto struct {
-	cfg    HTTPArgs
-	server *transport.Listener
+	cfg     HTTPArgs
+	server  *transport.Listener
 	handler proxy.Handler
 }
 
@@ -80,8 +81,20 @@ func (s *Auto) Start(args interface{}) (err error) {
 		authenticator = basicAuth
 	}
 
-	// Build traffic counter
-	counter := traffic.NewInMemoryCounter()
+	// Build traffic reporter if configured
+	var reporter traffic.Reporter
+	if *s.cfg.TrafficURL != "" {
+		reporter = traffic.NewHTTPReporter(
+			*s.cfg.TrafficURL,
+			*s.cfg.TrafficMode,
+			time.Duration(*s.cfg.TrafficInterval)*time.Second,
+			*s.cfg.FastGlobal,
+		)
+		log.Printf("traffic reporter: url=%s, mode=%s, interval=%ds, fast-global=%v",
+			*s.cfg.TrafficURL, *s.cfg.TrafficMode, *s.cfg.TrafficInterval, *s.cfg.FastGlobal)
+	} else {
+		reporter = traffic.NewNopReporter()
+	}
 
 	// Build config for handlers
 	serverCfg := config.ServerConfig{
@@ -118,25 +131,37 @@ func (s *Auto) Start(args interface{}) (err error) {
 		ServerConfig:   serverCfg,
 		AuthConfig:     authCfg,
 		UpstreamConfig: upstreamCfg,
-		HTTPTimeout:    time.Duration(*s.cfg.HTTPTimeout) * time.Millisecond,
-		Interval:       time.Duration(*s.cfg.Interval) * time.Second,
-		Blocked:        *s.cfg.Blocked,
-		Direct:         *s.cfg.Direct,
+		TrafficConfig: config.TrafficConfig{
+			URL:        *s.cfg.TrafficURL,
+			Mode:       *s.cfg.TrafficMode,
+			Interval:   time.Duration(*s.cfg.TrafficInterval) * time.Second,
+			FastGlobal: *s.cfg.FastGlobal,
+		},
+		HTTPTimeout: time.Duration(*s.cfg.HTTPTimeout) * time.Millisecond,
+		Interval:    time.Duration(*s.cfg.Interval) * time.Second,
+		Blocked:     *s.cfg.Blocked,
+		Direct:      *s.cfg.Direct,
 	}
 
 	socks5Cfg := config.SOCKS5Config{
 		ServerConfig:   serverCfg,
 		AuthConfig:     authCfg,
 		UpstreamConfig: upstreamCfg,
+		TrafficConfig: config.TrafficConfig{
+			URL:        *s.cfg.TrafficURL,
+			Mode:       *s.cfg.TrafficMode,
+			Interval:   time.Duration(*s.cfg.TrafficInterval) * time.Second,
+			FastGlobal: *s.cfg.FastGlobal,
+		},
 	}
 
 	// Create handlers
-	httpHandler, err := proxy.NewHTTPHandler(httpCfg, authenticator, counter)
+	httpHandler, err := proxy.NewHTTPHandler(httpCfg, authenticator, reporter)
 	if err != nil {
 		return err
 	}
 
-	socks5Handler, err := proxy.NewSOCKS5Handler(socks5Cfg, authenticator, counter)
+	socks5Handler, err := proxy.NewSOCKS5Handler(socks5Cfg, authenticator, reporter)
 	if err != nil {
 		return err
 	}
@@ -173,5 +198,5 @@ func (s *Auto) Start(args interface{}) (err error) {
 func (s *Auto) handleConn(conn net.Conn) {
 	// Connection semaphore check
 	// (simplified - in production would use buffered channel)
-	s.handler.HandleConnection(nil, conn)
+	s.handler.HandleConnection(context.TODO(), conn)
 }

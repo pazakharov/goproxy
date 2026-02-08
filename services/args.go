@@ -42,6 +42,10 @@ type TCPArgs struct {
 	Timeout             *int
 	PoolSize            *int
 	CheckParentInterval *int
+	TrafficURL          *string
+	TrafficMode         *string
+	TrafficInterval     *int
+	FastGlobal          *bool
 }
 
 type HTTPArgs struct {
@@ -63,6 +67,10 @@ type HTTPArgs struct {
 	CheckParentInterval *int
 	Debug               *bool
 	MaxConns            *int
+	TrafficURL          *string
+	TrafficMode         *string
+	TrafficInterval     *int
+	FastGlobal          *bool
 }
 type UDPArgs struct {
 	Args
@@ -70,6 +78,10 @@ type UDPArgs struct {
 	Timeout             *int
 	PoolSize            *int
 	CheckParentInterval *int
+	TrafficURL          *string
+	TrafficMode         *string
+	TrafficInterval     *int
+	FastGlobal          *bool
 }
 
 func (a *TCPArgs) Protocol() string {

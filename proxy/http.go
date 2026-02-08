@@ -22,23 +22,23 @@ import (
 
 // HTTPHandler implements HTTP and HTTPS proxy protocol
 type HTTPHandler struct {
-	cfg     config.HTTPConfig
-	auth    auth.Authenticator
-	traffic traffic.Counter
-	dialer  *transport.Dialer
-	checker utils.Checker
-	outPool *transport.Pool
+	cfg      config.HTTPConfig
+	auth     auth.Authenticator
+	reporter traffic.Reporter
+	dialer   *transport.Dialer
+	checker  utils.Checker
+	outPool  *transport.Pool
 }
 
 // NewHTTPHandler creates a new HTTP proxy handler
-func NewHTTPHandler(cfg config.HTTPConfig, authenticator auth.Authenticator, counter traffic.Counter) (*HTTPHandler, error) {
+func NewHTTPHandler(cfg config.HTTPConfig, authenticator auth.Authenticator, reporter traffic.Reporter) (*HTTPHandler, error) {
 	dialer := transport.NewDialer(cfg.UpstreamConfig.Timeout)
 
 	h := &HTTPHandler{
-		cfg:     cfg,
-		auth:    authenticator,
-		traffic: counter,
-		dialer:  dialer,
+		cfg:      cfg,
+		auth:     authenticator,
+		reporter: reporter,
+		dialer:   dialer,
 	}
 
 	// Initialize domain checker if parent proxy is configured
@@ -212,6 +212,15 @@ func (h *HTTPHandler) forward(inConn net.Conn, req utils.HTTPRequest, useProxy b
 	}
 	// Note: outConn will be closed by IoBind callback
 
+	// Get connection addresses for traffic reporting
+	serverAddr := inConn.LocalAddr().String()
+	clientAddr := inConn.RemoteAddr().String()
+	var outLocalAddr, outRemoteAddr string
+	if outConn != nil {
+		outLocalAddr = outConn.LocalAddr().String()
+		outRemoteAddr = outConn.RemoteAddr().String()
+	}
+
 	// Send appropriate response based on upstream/direct and HTTP/HTTPS
 	if req.Upstream != "" {
 		if req.IsHTTPS() {
@@ -227,9 +236,26 @@ func (h *HTTPHandler) forward(inConn net.Conn, req utils.HTTPRequest, useProxy b
 		outConn.Write(req.HeadBuf)
 	}
 
-	// Bind I/O with traffic counting
-	var bytesIn, bytesOut int64
+	// Create traffic session if reporter is configured
+	var session *traffic.Session
+	var stopPeriodic func()
+	if h.reporter != nil {
+		session = traffic.NewSession(
+			h.Protocol(),
+			serverAddr,
+			clientAddr,
+			address,
+			user,
+			outLocalAddr,
+			outRemoteAddr,
+			req.Upstream,
+			"", // sniff_domain - not implemented in this handler
+		)
+		// Start periodic reporting if in fast mode
+		stopPeriodic = h.reporter.StartPeriodic(session)
+	}
 
+	// Bind I/O with traffic counting
 	utils.IoBind(inConn, outConn, func(isSrcErr bool, err error) {
 		// Connection closed - close both connections
 		inConn.Close()
@@ -237,18 +263,19 @@ func (h *HTTPHandler) forward(inConn net.Conn, req utils.HTTPRequest, useProxy b
 		if h.cfg.Debug {
 			log.Printf("connection released: %s", address)
 		}
+		// Stop periodic reporting and send final report
+		if stopPeriodic != nil {
+			stopPeriodic()
+		}
+		// For normal mode, explicitly send the report (fast mode already sends in stopPeriodic)
+		if h.reporter != nil && h.reporter.Mode() == "normal" {
+			h.reporter.Report(session)
+		}
 	}, func(n int, isOut bool) {
-		if isOut {
-			bytesOut += int64(n)
-		} else {
-			bytesIn += int64(n)
+		if session != nil {
+			session.AddBytes(int64(n))
 		}
 	}, 0)
-
-	// Record traffic (will execute immediately since IoBind is async)
-	if h.traffic != nil && user != "" {
-		h.traffic.RecordBytes(user, address, bytesIn, bytesOut)
-	}
 }
 
 // connectViaUpstream connects through an upstream proxy

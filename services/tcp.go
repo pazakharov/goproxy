@@ -5,22 +5,26 @@ import (
 	"io"
 	"log"
 	"net"
-	"github.com/snail007/goproxy/utils"
 	"runtime/debug"
 	"time"
+
+	"github.com/snail007/goproxy/traffic"
+	"github.com/snail007/goproxy/utils"
 
 	"strconv"
 )
 
 type TCP struct {
-	outPool utils.OutPool
-	cfg     TCPArgs
+	outPool  utils.OutPool
+	cfg      TCPArgs
+	reporter traffic.Reporter
 }
 
 func NewTCP() Service {
 	return &TCP{
-		outPool: utils.OutPool{},
-		cfg:     TCPArgs{},
+		outPool:  utils.OutPool{},
+		cfg:      TCPArgs{},
+		reporter: traffic.NewNopReporter(),
 	}
 }
 func (s *TCP) InitService() {
@@ -33,6 +37,20 @@ func (s *TCP) StopService() {
 }
 func (s *TCP) Start(args interface{}) (err error) {
 	s.cfg = args.(TCPArgs)
+
+	// Initialize traffic reporter if configured
+	if *s.cfg.TrafficURL != "" {
+		s.reporter = traffic.NewHTTPReporter(
+			*s.cfg.TrafficURL,
+			*s.cfg.TrafficMode,
+			time.Duration(*s.cfg.TrafficInterval)*time.Second,
+			*s.cfg.FastGlobal,
+		)
+		log.Printf("traffic reporter: url=%s, mode=%s", *s.cfg.TrafficURL, *s.cfg.TrafficMode)
+	} else {
+		s.reporter = traffic.NewNopReporter()
+	}
+
 	if *s.cfg.Parent != "" {
 		log.Printf("use %s parent %s", *s.cfg.ParentType, *s.cfg.Parent)
 	} else {
@@ -97,11 +115,43 @@ func (s *TCP) OutToTCP(inConn *net.Conn) (err error) {
 	inLocalAddr := (*inConn).LocalAddr().String()
 	outAddr := outConn.RemoteAddr().String()
 	outLocalAddr := outConn.LocalAddr().String()
+
+	// Create traffic session if reporter is configured
+	var session *traffic.Session
+	var stopPeriodic func()
+	if s.reporter != nil {
+		session = traffic.NewSession(
+			s.cfg.Protocol(),
+			inLocalAddr,
+			inAddr,
+			"", // target_addr empty for TCP proxy
+			"", // username empty for TCP proxy
+			outLocalAddr,
+			outAddr,
+			*s.cfg.Parent,
+			"", // sniff_domain
+		)
+		// Start periodic reporting if in fast mode
+		stopPeriodic = s.reporter.StartPeriodic(session)
+	}
+
 	utils.IoBind((*inConn), outConn, func(isSrcErr bool, err error) {
 		log.Printf("conn %s - %s - %s -%s released", inAddr, inLocalAddr, outLocalAddr, outAddr)
 		utils.CloseConn(inConn)
 		utils.CloseConn(&outConn)
-	}, func(n int, d bool) {}, 0)
+		// Stop periodic reporting and send final report
+		if stopPeriodic != nil {
+			stopPeriodic()
+		}
+		// For normal mode, explicitly send the report (fast mode already sends in stopPeriodic)
+		if s.reporter != nil && s.reporter.Mode() == "normal" {
+			s.reporter.Report(session)
+		}
+	}, func(n int, d bool) {
+		if session != nil {
+			session.AddBytes(int64(n))
+		}
+	}, 0)
 	log.Printf("conn %s - %s - %s -%s connected", inAddr, inLocalAddr, outLocalAddr, outAddr)
 	return
 }

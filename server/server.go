@@ -20,7 +20,7 @@ type Server struct {
 	cfg      config.ServerConfig
 	auth     auth.Authenticator
 	handler  proxy.Handler
-	traffic  traffic.Counter
+	reporter traffic.Reporter
 	listener *transport.Listener
 	connSem  chan struct{}
 	ctx      context.Context
@@ -28,16 +28,16 @@ type Server struct {
 }
 
 // New creates a new server with the given configuration
-func New(cfg config.ServerConfig, authenticator auth.Authenticator, handler proxy.Handler, counter traffic.Counter) *Server {
+func New(cfg config.ServerConfig, authenticator auth.Authenticator, handler proxy.Handler, reporter traffic.Reporter) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &Server{
-		cfg:     cfg,
-		auth:    authenticator,
-		handler: handler,
-		traffic: counter,
-		ctx:     ctx,
-		cancel:  cancel,
+		cfg:      cfg,
+		auth:     authenticator,
+		handler:  handler,
+		reporter: reporter,
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 
 	// Initialize connection semaphore if max connections limit is set
@@ -120,19 +120,11 @@ func (s *Server) Stop() error {
 		s.auth.Close()
 	}
 
-	if s.traffic != nil {
-		s.traffic.Close()
+	if s.reporter != nil {
+		s.reporter.Close()
 	}
 
 	return nil
-}
-
-// GetTrafficSnapshot returns current traffic statistics
-func (s *Server) GetTrafficSnapshot() map[string]traffic.UserTraffic {
-	if s.traffic == nil {
-		return nil
-	}
-	return s.traffic.Snapshot()
 }
 
 // DefaultHTTPClient returns a pre-configured HTTP client for auth API

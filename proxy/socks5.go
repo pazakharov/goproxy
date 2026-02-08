@@ -22,11 +22,11 @@ import (
 
 // SOCKS5Handler implements SOCKS5 proxy protocol (RFC 1928)
 type SOCKS5Handler struct {
-	cfg     config.SOCKS5Config
-	auth    auth.Authenticator
-	traffic traffic.Counter
-	dialer  *transport.Dialer
-	outPool *transport.Pool
+	cfg      config.SOCKS5Config
+	auth     auth.Authenticator
+	reporter traffic.Reporter
+	dialer   *transport.Dialer
+	outPool  *transport.Pool
 }
 
 // SOCKS5 constants
@@ -62,14 +62,14 @@ const (
 )
 
 // NewSOCKS5Handler creates a new SOCKS5 proxy handler
-func NewSOCKS5Handler(cfg config.SOCKS5Config, authenticator auth.Authenticator, counter traffic.Counter) (*SOCKS5Handler, error) {
+func NewSOCKS5Handler(cfg config.SOCKS5Config, authenticator auth.Authenticator, reporter traffic.Reporter) (*SOCKS5Handler, error) {
 	dialer := transport.NewDialer(cfg.UpstreamConfig.Timeout)
 
 	h := &SOCKS5Handler{
-		cfg:     cfg,
-		auth:    authenticator,
-		traffic: counter,
-		dialer:  dialer,
+		cfg:      cfg,
+		auth:     authenticator,
+		reporter: reporter,
+		dialer:   dialer,
 	}
 
 	// Initialize connection pool if configured
@@ -374,6 +374,15 @@ func (h *SOCKS5Handler) handleConnect(conn net.Conn, targetAddr string, user str
 		return
 	}
 
+	// Get connection addresses for traffic reporting
+	serverAddr := conn.LocalAddr().String()
+	clientAddr := conn.RemoteAddr().String()
+	var outLocalAddr, outRemoteAddr string
+	if outConn != nil {
+		outLocalAddr = outConn.LocalAddr().String()
+		outRemoteAddr = outConn.RemoteAddr().String()
+	}
+
 	// Send success reply
 	localAddr := conn.LocalAddr().(*net.TCPAddr)
 	h.sendReplyWithAddr(conn, replySuccess, localAddr.IP, localAddr.Port)
@@ -386,27 +395,45 @@ func (h *SOCKS5Handler) handleConnect(conn net.Conn, targetAddr string, user str
 		}
 	}
 
-	// Bind I/O with traffic counting
-	var bytesIn, bytesOut int64
+	// Create traffic session if reporter is configured
+	var session *traffic.Session
+	var stopPeriodic func()
+	if h.reporter != nil {
+		session = traffic.NewSession(
+			h.Protocol(),
+			serverAddr,
+			clientAddr,
+			targetAddr,
+			user,
+			outLocalAddr,
+			outRemoteAddr,
+			upstream,
+			"", // sniff_domain - not implemented in this handler
+		)
+		// Start periodic reporting if in fast mode
+		stopPeriodic = h.reporter.StartPeriodic(session)
+	}
 
+	// Bind I/O with traffic counting
 	utils.IoBind(conn, outConn, func(isSrcErr bool, err error) {
 		conn.Close()
 		outConn.Close()
 		if h.cfg.Debug {
 			log.Printf("SOCKS5 connection released: %s", targetAddr)
 		}
+		// Stop periodic reporting and send final report
+		if stopPeriodic != nil {
+			stopPeriodic()
+		}
+		// For normal mode, explicitly send the report (fast mode already sends in stopPeriodic)
+		if h.reporter != nil && h.reporter.Mode() == "normal" {
+			h.reporter.Report(session)
+		}
 	}, func(n int, isOut bool) {
-		if isOut {
-			bytesOut += int64(n)
-		} else {
-			bytesIn += int64(n)
+		if session != nil {
+			session.AddBytes(int64(n))
 		}
 	}, 0)
-
-	// Record traffic
-	if h.traffic != nil && user != "" {
-		h.traffic.RecordBytes(user, targetAddr, bytesIn, bytesOut)
-	}
 }
 
 // connectViaUpstream connects to target through an upstream HTTP proxy using CONNECT

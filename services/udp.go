@@ -7,24 +7,28 @@ import (
 	"io"
 	"log"
 	"net"
-	"github.com/snail007/goproxy/utils"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/snail007/goproxy/traffic"
+	"github.com/snail007/goproxy/utils"
 )
 
 type UDP struct {
-	p       utils.ConcurrentMap
-	outPool utils.OutPool
-	cfg     UDPArgs
-	sc      *utils.ServerChannel
+	p        utils.ConcurrentMap
+	outPool  utils.OutPool
+	cfg      UDPArgs
+	sc       *utils.ServerChannel
+	reporter traffic.Reporter
 }
 
 func NewUDP() Service {
 	return &UDP{
-		outPool: utils.OutPool{},
-		p:       utils.NewConcurrentMap(),
+		outPool:  utils.OutPool{},
+		p:        utils.NewConcurrentMap(),
+		reporter: traffic.NewNopReporter(),
 	}
 }
 func (s *UDP) InitService() {
@@ -39,6 +43,20 @@ func (s *UDP) StopService() {
 }
 func (s *UDP) Start(args interface{}) (err error) {
 	s.cfg = args.(UDPArgs)
+
+	// Initialize traffic reporter if configured
+	if *s.cfg.TrafficURL != "" {
+		s.reporter = traffic.NewHTTPReporter(
+			*s.cfg.TrafficURL,
+			*s.cfg.TrafficMode,
+			time.Duration(*s.cfg.TrafficInterval)*time.Second,
+			*s.cfg.FastGlobal,
+		)
+		log.Printf("traffic reporter: url=%s, mode=%s", *s.cfg.TrafficURL, *s.cfg.TrafficMode)
+	} else {
+		s.reporter = traffic.NewNopReporter()
+	}
+
 	if *s.cfg.Parent != "" {
 		log.Printf("use %s parent %s", *s.cfg.ParentType, *s.cfg.Parent)
 	} else {

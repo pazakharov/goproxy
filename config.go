@@ -62,6 +62,10 @@ func initConfig() (err error) {
 	httpArgs.CheckParentInterval = http.Flag("check-parent-interval", "check if proxy is okay every interval seconds,zero: means no check").Short('I').Default("3").Int()
 	httpArgs.Debug = http.Flag("debug", "enable debug logging").Default("false").Bool()
 	httpArgs.MaxConns = http.Flag("max-conns", "maximum concurrent connections, 0 = unlimited").Default("10000").Int()
+	httpArgs.TrafficURL = http.Flag("traffic-url", "traffic reporting HTTP endpoint URL").Default("").String()
+	httpArgs.TrafficMode = http.Flag("traffic-mode", "traffic reporting mode: normal|fast").Default("normal").Enum("normal", "fast")
+	httpArgs.TrafficInterval = http.Flag("traffic-interval", "traffic reporting interval in seconds for fast mode").Default("5").Int()
+	httpArgs.FastGlobal = http.Flag("fast-global", "use single global reporter for fast mode (POST JSON)").Default("false").Bool()
 
 	//########auto#########
 	auto := app.Command("auto", "proxy with auto-detect (HTTP/SOCKS5 on same port)")
@@ -82,6 +86,10 @@ func initConfig() (err error) {
 	autoArgs.CheckParentInterval = auto.Flag("check-parent-interval", "check if proxy is okay every interval seconds,zero: means no check").Short('I').Default("3").Int()
 	autoArgs.Debug = auto.Flag("debug", "enable debug logging").Default("false").Bool()
 	autoArgs.MaxConns = auto.Flag("max-conns", "maximum concurrent connections, 0 = unlimited").Default("10000").Int()
+	autoArgs.TrafficURL = auto.Flag("traffic-url", "traffic reporting HTTP endpoint URL").Default("").String()
+	autoArgs.TrafficMode = auto.Flag("traffic-mode", "traffic reporting mode: normal|fast").Default("normal").Enum("normal", "fast")
+	autoArgs.TrafficInterval = auto.Flag("traffic-interval", "traffic reporting interval in seconds for fast mode").Default("5").Int()
+	autoArgs.FastGlobal = auto.Flag("fast-global", "use single global reporter for fast mode (POST JSON)").Default("false").Bool()
 
 	//########tcp#########
 	tcp := app.Command("tcp", "proxy on tcp mode")
@@ -90,6 +98,10 @@ func initConfig() (err error) {
 	tcpArgs.IsTLS = tcp.Flag("tls", "proxy on tls mode").Default("false").Bool()
 	tcpArgs.PoolSize = tcp.Flag("pool-size", "conn pool size , which connect to parent proxy, zero: means turn off pool").Short('L').Default("20").Int()
 	tcpArgs.CheckParentInterval = tcp.Flag("check-parent-interval", "check if proxy is okay every interval seconds,zero: means no check").Short('I').Default("3").Int()
+	tcpArgs.TrafficURL = tcp.Flag("traffic-url", "traffic reporting HTTP endpoint URL").Default("").String()
+	tcpArgs.TrafficMode = tcp.Flag("traffic-mode", "traffic reporting mode: normal|fast").Default("normal").Enum("normal", "fast")
+	tcpArgs.TrafficInterval = tcp.Flag("traffic-interval", "traffic reporting interval in seconds for fast mode").Default("5").Int()
+	tcpArgs.FastGlobal = tcp.Flag("fast-global", "use single global reporter for fast mode (POST JSON)").Default("false").Bool()
 
 	//########udp#########
 	udp := app.Command("udp", "proxy on udp mode")
@@ -97,6 +109,10 @@ func initConfig() (err error) {
 	udpArgs.ParentType = udp.Flag("parent-type", "parent protocol type <tls|tcp|udp>").Short('T').Enum("tls", "tcp", "udp")
 	udpArgs.PoolSize = udp.Flag("pool-size", "conn pool size , which connect to parent proxy, zero: means turn off pool").Short('L').Default("20").Int()
 	udpArgs.CheckParentInterval = udp.Flag("check-parent-interval", "check if proxy is okay every interval seconds,zero: means no check").Short('I').Default("3").Int()
+	udpArgs.TrafficURL = udp.Flag("traffic-url", "traffic reporting HTTP endpoint URL").Default("").String()
+	udpArgs.TrafficMode = udp.Flag("traffic-mode", "traffic reporting mode: normal|fast").Default("normal").Enum("normal", "fast")
+	udpArgs.TrafficInterval = udp.Flag("traffic-interval", "traffic reporting interval in seconds for fast mode").Default("5").Int()
+	udpArgs.FastGlobal = udp.Flag("fast-global", "use single global reporter for fast mode (POST JSON)").Default("false").Bool()
 
 	//########tunnel-server#########
 	tunnelServer := app.Command("tserver", "proxy on tunnel server mode")
