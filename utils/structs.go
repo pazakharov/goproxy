@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"encoding/base64"
@@ -9,6 +10,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -32,9 +34,9 @@ type CheckerItem struct {
 	FailCount    uint
 }
 
-//NewChecker args:
-//timeout : tcp timeout milliseconds ,connect to host
-//interval: recheck domain interval seconds
+// NewChecker args:
+// timeout : tcp timeout milliseconds ,connect to host
+// interval: recheck domain interval seconds
 func NewChecker(timeout int, interval int64, blockedFile, directFile string) Checker {
 	ch := Checker{
 		data:     NewConcurrentMap(),
@@ -232,42 +234,84 @@ type HTTPRequest struct {
 	Host        string
 	Method      string
 	URL         string
+	Upstream    string
 	hostOrURL   string
 	isBasicAuth bool
 	basicAuth   *BasicAuth
+	authURL     string
+	authClient  *http.Client
+	authCache   *AuthCache
+	debug       bool
 }
 
-func NewHTTPRequest(inConn *net.Conn, bufSize int, isBasicAuth bool, basicAuth *BasicAuth) (req HTTPRequest, err error) {
-	buf := make([]byte, bufSize)
-	len := 0
+func NewHTTPRequest(inConn *net.Conn, bufSize int, isBasicAuth bool, basicAuth *BasicAuth, authURL string, authClient *http.Client, authCache *AuthCache, debug bool) (req HTTPRequest, err error) {
+	const maxHeaderSize = 64 * 1024 // 64KB max header size
 	req = HTTPRequest{
-		conn: inConn,
+		conn:        inConn,
+		isBasicAuth: isBasicAuth,
+		basicAuth:   basicAuth,
+		authURL:     authURL,
+		authClient:  authClient,
+		authCache:   authCache,
+		debug:       debug,
 	}
-	len, err = (*inConn).Read(buf[:])
-	if err != nil {
-		if err != io.EOF {
-			err = fmt.Errorf("http decoder read err:%s", err)
+
+	// Use bufio.Reader to properly read HTTP headers until \r\n\r\n
+	reader := bufio.NewReader(*inConn)
+	var headerBuf bytes.Buffer
+	totalRead := 0
+
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			err = fmt.Errorf("http header read error: %s", readErr)
+			CloseConn(inConn)
+			return
 		}
-		CloseConn(inConn)
-		return
+
+		n := len(line)
+		totalRead += n
+		if totalRead > maxHeaderSize {
+			err = fmt.Errorf("http headers exceed maximum size of %d bytes", maxHeaderSize)
+			CloseConn(inConn)
+			return
+		}
+
+		headerBuf.WriteString(line)
+
+		// Check for end of headers (empty line)
+		if line == "\r\n" || line == "\n" {
+			break
+		}
 	}
-	req.HeadBuf = buf[:len]
+
+	req.HeadBuf = headerBuf.Bytes()
+
+	// Parse request line (first line)
 	index := bytes.IndexByte(req.HeadBuf, '\n')
 	if index == -1 {
-		err = fmt.Errorf("http decoder data line err:%s", string(req.HeadBuf)[:50])
+		preview := string(req.HeadBuf)
+		if len(preview) > 50 {
+			preview = preview[:50]
+		}
+		err = fmt.Errorf("http decoder data line err:%s", preview)
 		CloseConn(inConn)
 		return
 	}
 	fmt.Sscanf(string(req.HeadBuf[:index]), "%s%s", &req.Method, &req.hostOrURL)
 	if req.Method == "" || req.hostOrURL == "" {
-		err = fmt.Errorf("http decoder data err:%s", string(req.HeadBuf)[:50])
+		preview2 := string(req.HeadBuf)
+		if len(preview2) > 50 {
+			preview2 = preview2[:50]
+		}
+		err = fmt.Errorf("http decoder data err:%s", preview2)
 		CloseConn(inConn)
 		return
 	}
 	req.Method = strings.ToUpper(req.Method)
-	req.isBasicAuth = isBasicAuth
-	req.basicAuth = basicAuth
-	log.Printf("%s:%s", req.Method, req.hostOrURL)
+	if req.debug {
+		log.Printf("%s:%s", req.Method, req.hostOrURL)
+	}
 
 	if req.IsHTTPS() {
 		err = req.HTTPS()
@@ -292,6 +336,12 @@ func (req *HTTPRequest) HTTP() (err error) {
 	return
 }
 func (req *HTTPRequest) HTTPS() (err error) {
+	if req.isBasicAuth {
+		err = req.BasicAuth()
+		if err != nil {
+			return
+		}
+	}
 	req.Host = req.hostOrURL
 	req.addPortIfNot()
 	//_, err = fmt.Fprint(*req.conn, "HTTP/1.1 200 Connection established\r\n\r\n")
@@ -308,11 +358,15 @@ func (req *HTTPRequest) IsHTTPS() bool {
 func (req *HTTPRequest) BasicAuth() (err error) {
 
 	//log.Printf("request :%s", string(b[:n]))
-	authorization, err := req.getHeader("Authorization")
+	// Try Proxy-Authorization first (standard for proxy), then Authorization
+	authorization, err := req.GetHeader("Proxy-Authorization")
 	if err != nil {
-		fmt.Fprint((*req.conn), "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"\"\r\n\r\nUnauthorized")
-		CloseConn(req.conn)
-		return
+		authorization, err = req.GetHeader("Authorization")
+		if err != nil {
+			fmt.Fprint((*req.conn), "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"\"\r\n\r\nUnauthorized")
+			CloseConn(req.conn)
+			return
+		}
 	}
 	//log.Printf("Authorization:%s", authorization)
 	basic := strings.Fields(authorization)
@@ -321,13 +375,90 @@ func (req *HTTPRequest) BasicAuth() (err error) {
 		CloseConn(req.conn)
 		return
 	}
-	user, err := base64.StdEncoding.DecodeString(basic[1])
+	userPass, err := base64.StdEncoding.DecodeString(basic[1])
 	if err != nil {
 		err = fmt.Errorf("authorization data parse error,ERR:%s", err)
 		CloseConn(req.conn)
 		return
 	}
-	authOk := (*req.basicAuth).Check(string(user))
+
+	// Split user:pass
+	userPassStr := string(userPass)
+	colonIdx := strings.Index(userPassStr, ":")
+	if colonIdx == -1 {
+		err = fmt.Errorf("authorization data format error, no colon found")
+		CloseConn(req.conn)
+		return
+	}
+	user := userPassStr[:colonIdx]
+	pass := userPassStr[colonIdx+1:]
+
+	// If authURL is set, use external API for authentication
+	if req.authURL != "" {
+		cacheKey := user + ":" + pass
+
+		// Check cache first
+		if req.authCache != nil && req.authCache.Enabled() {
+			if cachedUpstream, cacheHit := req.authCache.Get(cacheKey); cacheHit {
+				if req.debug {
+					log.Printf("auth cache hit for user: %s", user)
+				}
+				if cachedUpstream != "" {
+					req.Upstream = cachedUpstream
+				}
+				return
+			}
+		}
+
+		clientIP := (*req.conn).RemoteAddr().String()
+		localIP := (*req.conn).LocalAddr().String()
+
+		// Build auth URL with query parameters
+		authReqURL := req.authURL + "?user=" + url.QueryEscape(user) +
+			"&pass=" + url.QueryEscape(pass) +
+			"&ip=" + url.QueryEscape(clientIP) +
+			"&local_ip=" + url.QueryEscape(localIP) +
+			"&target=" + url.QueryEscape(req.hostOrURL)
+
+		resp, httpErr := req.authClient.Get(authReqURL)
+		if httpErr != nil {
+			log.Printf("auth API request failed: %s", httpErr)
+			fmt.Fprint((*req.conn), "HTTP/1.1 401 Unauthorized\r\n\r\nUnauthorized")
+			CloseConn(req.conn)
+			err = fmt.Errorf("auth API request failed")
+			return
+		}
+		defer resp.Body.Close()
+		// Drain body to allow connection reuse by http.Client pool
+		io.Copy(io.Discard, resp.Body)
+
+		// Read upstream from response header per goproxy spec
+		upstream := strings.TrimSpace(resp.Header.Get("upstream"))
+
+		// Check response status - 204 or 200 means success
+		if resp.StatusCode == 204 || resp.StatusCode == 200 {
+			if req.debug {
+				log.Printf("auth API success for user: %s, upstream: %s", user, upstream)
+			}
+			if upstream != "" {
+				req.Upstream = upstream
+			}
+			// Cache successful auth
+			if req.authCache != nil && req.authCache.Enabled() {
+				req.authCache.Set(cacheKey, upstream)
+			}
+			return
+		}
+
+		log.Printf("auth API failed for user: %s, status: %d", user, resp.StatusCode)
+		fmt.Fprint((*req.conn), "HTTP/1.1 401 Unauthorized\r\n\r\nUnauthorized")
+		CloseConn(req.conn)
+		err = fmt.Errorf("auth API rejected credentials")
+		return
+	}
+
+	// Fallback to local basic auth check
+	authOk := (*req.basicAuth).Check(userPassStr)
 	//log.Printf("auth %s,%v", string(user), authOk)
 	if !authOk {
 		fmt.Fprint((*req.conn), "HTTP/1.1 401 Unauthorized\r\n\r\nUnauthorized")
@@ -341,14 +472,14 @@ func (req *HTTPRequest) getHTTPURL() (URL string, err error) {
 	if !strings.HasPrefix(req.hostOrURL, "/") {
 		return req.hostOrURL, nil
 	}
-	_host, err := req.getHeader("host")
+	_host, err := req.GetHeader("host")
 	if err != nil {
 		return
 	}
 	URL = fmt.Sprintf("http://%s%s", _host, req.hostOrURL)
 	return
 }
-func (req *HTTPRequest) getHeader(key string) (val string, err error) {
+func (req *HTTPRequest) GetHeader(key string) (val string, err error) {
 	key = strings.ToUpper(key)
 	lines := strings.Split(string(req.HeadBuf), "\r\n")
 	for _, line := range lines {

@@ -1,20 +1,31 @@
 package services
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"github.com/snail007/goproxy/utils"
+	"net/http"
+	"net/url"
 	"runtime/debug"
 	"strconv"
+	"strings"
+	"time"
+
+	"github.com/snail007/goproxy/utils"
 )
 
 type HTTP struct {
-	outPool   utils.OutPool
-	cfg       HTTPArgs
-	checker   utils.Checker
-	basicAuth utils.BasicAuth
+	outPool    utils.OutPool
+	cfg        HTTPArgs
+	checker    utils.Checker
+	basicAuth  utils.BasicAuth
+	authClient *http.Client
+	authCache  *utils.AuthCache
+	connSem    chan struct{} // semaphore for limiting concurrent connections
 }
 
 func NewHTTP() Service {
@@ -38,6 +49,26 @@ func (s *HTTP) StopService() {
 }
 func (s *HTTP) Start(args interface{}) (err error) {
 	s.cfg = args.(HTTPArgs)
+	// Initialize connection semaphore if max connections limit is set
+	if *s.cfg.MaxConns > 0 {
+		s.connSem = make(chan struct{}, *s.cfg.MaxConns)
+		log.Printf("max concurrent connections limited to %d", *s.cfg.MaxConns)
+	}
+	if *s.cfg.AuthURL != "" {
+		s.authClient = &http.Client{
+			Timeout: time.Duration(*s.cfg.AuthTimeout) * time.Millisecond,
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 20,
+				IdleConnTimeout:     90 * time.Second,
+			},
+		}
+		log.Printf("auth-url: %s, timeout: %dms", *s.cfg.AuthURL, *s.cfg.AuthTimeout)
+		if *s.cfg.AuthCacheTTL > 0 {
+			s.authCache = utils.NewAuthCache(*s.cfg.AuthCacheTTL)
+			log.Printf("auth cache enabled, TTL: %ds", *s.cfg.AuthCacheTTL)
+		}
+	}
 	if *s.cfg.Parent != "" {
 		log.Printf("use %s parent %s", *s.cfg.ParentType, *s.cfg.Parent)
 		s.InitOutConnPool()
@@ -69,7 +100,22 @@ func (s *HTTP) callback(inConn net.Conn) {
 			log.Printf("http(s) conn handler crashed with err : %s \nstack: %s", err, string(debug.Stack()))
 		}
 	}()
-	req, err := utils.NewHTTPRequest(&inConn, 4096, s.IsBasicAuth(), &s.basicAuth)
+	// Acquire semaphore slot if connection limit is enabled
+	if s.connSem != nil {
+		select {
+		case s.connSem <- struct{}{}:
+			// Acquired slot, will release in defer
+			defer func() { <-s.connSem }()
+		default:
+			// Semaphore full, reject connection
+			fmt.Fprint(inConn, "HTTP/1.1 503 Service Unavailable\r\n\r\nServer busy")
+			utils.CloseConn(&inConn)
+			return
+		}
+	}
+	// Set read deadline to protect against slowloris attacks
+	inConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	req, err := utils.NewHTTPRequest(&inConn, 4096, s.IsBasicAuth(), &s.basicAuth, *s.cfg.AuthURL, s.authClient, s.authCache, *s.cfg.Debug)
 	if err != nil {
 		if err != io.EOF {
 			log.Printf("decoder error , form %s, ERR:%s", err, inConn.RemoteAddr())
@@ -77,6 +123,8 @@ func (s *HTTP) callback(inConn net.Conn) {
 		utils.CloseConn(&inConn)
 		return
 	}
+	// Clear deadline after successful header parsing
+	inConn.SetReadDeadline(time.Time{})
 	address := req.Host
 
 	useProxy := true
@@ -94,7 +142,9 @@ func (s *HTTP) callback(inConn net.Conn) {
 		useProxy, _, _ = s.checker.IsBlocked(req.Host)
 		//log.Printf("blocked ? : %v, %s , fail:%d ,success:%d", useProxy, address, n, m)
 	}
-	log.Printf("use proxy : %v, %s", useProxy, address)
+	if *s.cfg.Debug {
+		log.Printf("use proxy : %v, %s", useProxy, address)
+	}
 	//os.Exit(0)
 	err = s.OutToTCP(useProxy, address, &inConn, &req)
 	if err != nil {
@@ -117,7 +167,16 @@ func (s *HTTP) OutToTCP(useProxy bool, address string, inConn *net.Conn, req *ut
 	}
 	var outConn net.Conn
 	var _outConn interface{}
-	if useProxy {
+
+	if req.Upstream != "" {
+		// Connect via upstream proxy from auth API
+		outConn, err = s.connectViaUpstream(req, address)
+		if err != nil {
+			log.Printf("connect to upstream %s fail: %s", req.Upstream, err)
+			utils.CloseConn(inConn)
+			return
+		}
+	} else if useProxy {
 		_outConn, err = s.outPool.Pool.Get()
 		if err == nil {
 			outConn = _outConn.(net.Conn)
@@ -126,7 +185,7 @@ func (s *HTTP) OutToTCP(useProxy bool, address string, inConn *net.Conn, req *ut
 		outConn, err = utils.ConnectHost(address, *s.cfg.Timeout)
 	}
 	if err != nil {
-		log.Printf("connect to %s , err:%s", *s.cfg.Parent, err)
+		log.Printf("connect to %s , err:%s", address, err)
 		utils.CloseConn(inConn)
 		return
 	}
@@ -134,17 +193,145 @@ func (s *HTTP) OutToTCP(useProxy bool, address string, inConn *net.Conn, req *ut
 	outAddr := outConn.RemoteAddr().String()
 	outLocalAddr := outConn.LocalAddr().String()
 
-	if req.IsHTTPS() && !useProxy {
+	if req.Upstream != "" {
+		if req.IsHTTPS() {
+			// For HTTPS via upstream: CONNECT already sent in connectViaUpstream
+			req.HTTPSReply()
+		} else {
+			// For HTTP via upstream: forward modified request
+			if *s.cfg.Debug {
+				log.Printf("upstream HeadBuf:\n%s", string(req.HeadBuf))
+			}
+			_, writeErr := outConn.Write(req.HeadBuf)
+			if writeErr != nil {
+				log.Printf("write to upstream failed: %s", writeErr)
+				utils.CloseConn(inConn)
+				utils.CloseConn(&outConn)
+				err = writeErr
+				return
+			}
+		}
+	} else if req.IsHTTPS() && !useProxy {
 		req.HTTPSReply()
 	} else {
-		outConn.Write(req.HeadBuf)
+		_, writeErr := outConn.Write(req.HeadBuf)
+		if writeErr != nil {
+			log.Printf("write to target failed: %s", writeErr)
+			utils.CloseConn(inConn)
+			utils.CloseConn(&outConn)
+			err = writeErr
+			return
+		}
 	}
 	utils.IoBind((*inConn), outConn, func(isSrcErr bool, err error) {
-		log.Printf("conn %s - %s - %s -%s released [%s]", inAddr, inLocalAddr, outLocalAddr, outAddr, req.Host)
+		if *s.cfg.Debug {
+			log.Printf("conn %s - %s - %s -%s released [%s]", inAddr, inLocalAddr, outLocalAddr, outAddr, req.Host)
+		}
 		utils.CloseConn(inConn)
 		utils.CloseConn(&outConn)
 	}, func(n int, d bool) {}, 0)
-	log.Printf("conn %s - %s - %s - %s connected [%s]", inAddr, inLocalAddr, outLocalAddr, outAddr, req.Host)
+	if *s.cfg.Debug {
+		log.Printf("conn %s - %s - %s - %s connected [%s]", inAddr, inLocalAddr, outLocalAddr, outAddr, req.Host)
+	}
+	return
+}
+
+func (s *HTTP) connectViaUpstream(req *utils.HTTPRequest, targetAddress string) (outConn net.Conn, err error) {
+	upstreamURL, parseErr := url.Parse(req.Upstream)
+	if parseErr != nil {
+		err = fmt.Errorf("invalid upstream URL: %s", parseErr)
+		return
+	}
+
+	upstreamAddr := upstreamURL.Host
+	if !strings.Contains(upstreamAddr, ":") {
+		upstreamAddr += ":80"
+	}
+
+	// Build upstream Proxy-Authorization header
+	var upstreamAuthHeader string
+	if upstreamURL.User != nil {
+		upstreamUser := upstreamURL.User.Username()
+		upstreamPass, _ := upstreamURL.User.Password()
+		upstreamAuth := base64.StdEncoding.EncodeToString([]byte(upstreamUser + ":" + upstreamPass))
+		upstreamAuthHeader = "Proxy-Authorization: Basic " + upstreamAuth
+	}
+
+	// Connect to upstream proxy
+	outConn, err = utils.ConnectHost(upstreamAddr, *s.cfg.Timeout)
+	if err != nil {
+		return
+	}
+	if *s.cfg.Debug {
+		log.Printf("connected to upstream proxy %s", upstreamAddr)
+	}
+
+	if req.IsHTTPS() {
+		// For HTTPS: send CONNECT to upstream proxy
+		connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", targetAddress, targetAddress)
+		if upstreamAuthHeader != "" {
+			connectReq += upstreamAuthHeader + "\r\n"
+		}
+		connectReq += "\r\n"
+		_, err = outConn.Write([]byte(connectReq))
+		if err != nil {
+			utils.CloseConn(&outConn)
+			return
+		}
+		// Read upstream response via buffered reader
+		reader := bufio.NewReader(outConn)
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			utils.CloseConn(&outConn)
+			err = fmt.Errorf("upstream CONNECT read error: %s", readErr)
+			return
+		}
+		if !strings.Contains(line, "200") {
+			utils.CloseConn(&outConn)
+			err = fmt.Errorf("upstream CONNECT rejected: %s", strings.TrimSpace(line))
+			return
+		}
+		// Drain remaining headers
+		for {
+			line, readErr = reader.ReadString('\n')
+			if readErr != nil || strings.TrimSpace(line) == "" {
+				break
+			}
+		}
+		// Wrap conn with buffered reader so any read-ahead bytes are not lost
+		outConn = utils.NewBufferedConn(outConn, reader)
+	} else {
+		// For HTTP: replace client Proxy-Authorization with upstream's in HeadBuf
+		// Use byte-level operations to safely handle buffers that may contain partial body data
+		buf := req.HeadBuf
+
+		// Remove existing Proxy-Authorization header (case-insensitive)
+		proxyAuthKey := []byte("proxy-authorization:")
+		lowerBuf := bytes.ToLower(buf)
+		if idx := bytes.Index(lowerBuf, proxyAuthKey); idx >= 0 {
+			// Find the end of this header line (\r\n)
+			endIdx := bytes.Index(buf[idx:], []byte("\r\n"))
+			if endIdx >= 0 {
+				// Remove the header line including trailing \r\n
+				buf = append(buf[:idx], buf[idx+endIdx+2:]...)
+			}
+		}
+
+		// Insert upstream auth header before the \r\n\r\n (end of headers)
+		if upstreamAuthHeader != "" {
+			headerEnd := []byte("\r\n\r\n")
+			if idx := bytes.Index(buf, headerEnd); idx >= 0 {
+				insertion := []byte(upstreamAuthHeader + "\r\n")
+				newBuf := make([]byte, 0, len(buf)+len(insertion))
+				newBuf = append(newBuf, buf[:idx+2]...) // up to and including first \r\n
+				newBuf = append(newBuf, insertion...)   // new header
+				newBuf = append(newBuf, buf[idx+2:]...) // remaining \r\n + body
+				buf = newBuf
+			}
+		}
+
+		req.HeadBuf = buf
+	}
 	return
 }
 func (s *HTTP) OutToUDP(inConn *net.Conn) (err error) {
@@ -183,7 +370,7 @@ func (s *HTTP) InitBasicAuth() (err error) {
 	return
 }
 func (s *HTTP) IsBasicAuth() bool {
-	return *s.cfg.AuthFile != "" || len(*s.cfg.Auth) > 0
+	return *s.cfg.AuthFile != "" || len(*s.cfg.Auth) > 0 || *s.cfg.AuthURL != ""
 }
 func (s *HTTP) IsDeadLoop(inLocalAddr string, host string) bool {
 	inIP, inPort, err := net.SplitHostPort(inLocalAddr)

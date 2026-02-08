@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+
 	"github.com/snail007/goproxy/services"
 	"github.com/snail007/goproxy/utils"
 
@@ -28,6 +29,7 @@ func initConfig() (err error) {
 	//define  args
 	tcpArgs := services.TCPArgs{}
 	httpArgs := services.HTTPArgs{}
+	autoArgs := services.HTTPArgs{} // reuses HTTPArgs for auto-detect mode
 	tunnelServerArgs := services.TunnelServerArgs{}
 	tunnelClientArgs := services.TunnelClientArgs{}
 	tunnelBridgeArgs := services.TunnelBridgeArgs{}
@@ -53,8 +55,33 @@ func initConfig() (err error) {
 	httpArgs.Direct = http.Flag("direct", "direct domain file , one domain each line").Default("direct").Short('d').String()
 	httpArgs.AuthFile = http.Flag("auth-file", "http basic auth file,\"username:password\" each line in file").Short('F').String()
 	httpArgs.Auth = http.Flag("auth", "http basic auth username and password, mutiple user repeat -a ,such as: -a user1:pass1 -a user2:pass2").Short('a').Strings()
+	httpArgs.AuthURL = http.Flag("auth-url", "external http auth api url, returns 204 on success").String()
+	httpArgs.AuthTimeout = http.Flag("auth-timeout", "auth api request timeout milliseconds").Default("3000").Int()
+	httpArgs.AuthCacheTTL = http.Flag("auth-cache-ttl", "auth result cache TTL seconds, 0 to disable").Default("60").Int()
 	httpArgs.PoolSize = http.Flag("pool-size", "conn pool size , which connect to parent proxy, zero: means turn off pool").Short('L').Default("20").Int()
 	httpArgs.CheckParentInterval = http.Flag("check-parent-interval", "check if proxy is okay every interval seconds,zero: means no check").Short('I').Default("3").Int()
+	httpArgs.Debug = http.Flag("debug", "enable debug logging").Default("false").Bool()
+	httpArgs.MaxConns = http.Flag("max-conns", "maximum concurrent connections, 0 = unlimited").Default("10000").Int()
+
+	//########auto#########
+	auto := app.Command("auto", "proxy with auto-detect (HTTP/SOCKS5 on same port)")
+	autoArgs.LocalType = auto.Flag("local-type", "parent protocol type <tls|tcp>").Default("tcp").Short('t').Enum("tls", "tcp")
+	autoArgs.ParentType = auto.Flag("parent-type", "parent protocol type <tls|tcp>").Short('T').Enum("tls", "tcp")
+	autoArgs.Always = auto.Flag("always", "always use parent proxy").Default("false").Bool()
+	autoArgs.Timeout = auto.Flag("timeout", "tcp timeout milliseconds when connect to real server or parent proxy").Default("2000").Int()
+	autoArgs.HTTPTimeout = auto.Flag("http-timeout", "check domain if blocked , http request timeout milliseconds when connect to host").Default("3000").Int()
+	autoArgs.Interval = auto.Flag("interval", "check domain if blocked every interval seconds").Default("10").Int()
+	autoArgs.Blocked = auto.Flag("blocked", "blocked domain file , one domain each line").Default("blocked").Short('b').String()
+	autoArgs.Direct = auto.Flag("direct", "direct domain file , one domain each line").Default("direct").Short('d').String()
+	autoArgs.AuthFile = auto.Flag("auth-file", "http basic auth file,\"username:password\" each line in file").Short('F').String()
+	autoArgs.Auth = auto.Flag("auth", "http basic auth username and password, mutiple user repeat -a ,such as: -a user1:pass1 -a user2:pass2").Short('a').Strings()
+	autoArgs.AuthURL = auto.Flag("auth-url", "external http auth api url, returns 204 on success").String()
+	autoArgs.AuthTimeout = auto.Flag("auth-timeout", "auth api request timeout milliseconds").Default("3000").Int()
+	autoArgs.AuthCacheTTL = auto.Flag("auth-cache-ttl", "auth result cache TTL seconds, 0 to disable").Default("60").Int()
+	autoArgs.PoolSize = auto.Flag("pool-size", "conn pool size , which connect to parent proxy, zero: means turn off pool").Short('L').Default("20").Int()
+	autoArgs.CheckParentInterval = auto.Flag("check-parent-interval", "check if proxy is okay every interval seconds,zero: means no check").Short('I').Default("3").Int()
+	autoArgs.Debug = auto.Flag("debug", "enable debug logging").Default("false").Bool()
+	autoArgs.MaxConns = auto.Flag("max-conns", "maximum concurrent connections, 0 = unlimited").Default("10000").Int()
 
 	//########tcp#########
 	tcp := app.Command("tcp", "proxy on tcp mode")
@@ -95,6 +122,7 @@ func initConfig() (err error) {
 
 	//common args
 	httpArgs.Args = args
+	autoArgs.Args = args
 	tcpArgs.Args = args
 	udpArgs.Args = args
 	tunnelBridgeArgs.Args = args
@@ -105,6 +133,7 @@ func initConfig() (err error) {
 	//regist services and run service
 	serviceName := kingpin.MustParse(app.Parse(os.Args[1:]))
 	services.Regist("http", services.NewHTTP(), httpArgs)
+	services.Regist("auto", services.NewAuto(), autoArgs)
 	services.Regist("tcp", services.NewTCP(), tcpArgs)
 	services.Regist("udp", services.NewUDP(), udpArgs)
 	services.Regist("tserver", services.NewTunnelServer(), tunnelServerArgs)

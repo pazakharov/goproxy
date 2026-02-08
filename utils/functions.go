@@ -146,6 +146,21 @@ func ConnectHost(hostAndPort string, timeout int) (conn net.Conn, err error) {
 	conn, err = net.DialTimeout("tcp", hostAndPort, time.Duration(timeout)*time.Millisecond)
 	return
 }
+
+// BufferedConn wraps a net.Conn with a bufio.Reader so that any bytes
+// already buffered (read-ahead) by the reader are not lost.
+type BufferedConn struct {
+	r *bufio.Reader
+	net.Conn
+}
+
+func NewBufferedConn(c net.Conn, r *bufio.Reader) *BufferedConn {
+	return &BufferedConn{r: r, Conn: c}
+}
+
+func (bc *BufferedConn) Read(p []byte) (int, error) {
+	return bc.r.Read(p)
+}
 func ListenTls(ip string, port int, certBytes, keyBytes []byte) (ln *net.Listener, err error) {
 	var cert tls.Certificate
 	cert, err = tls.X509KeyPair(certBytes, keyBytes)

@@ -1,3 +1,7 @@
 /.idea
 /goproxy
 /go.sum
+/build
+/auth-api
+proxy.crt
+proxy.key

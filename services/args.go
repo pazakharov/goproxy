@@ -53,11 +53,16 @@ type HTTPArgs struct {
 	Direct              *string
 	AuthFile            *string
 	Auth                *[]string
+	AuthURL             *string
+	AuthTimeout         *int
+	AuthCacheTTL        *int
 	ParentType          *string
 	LocalType           *string
 	Timeout             *int
 	PoolSize            *int
 	CheckParentInterval *int
+	Debug               *bool
+	MaxConns            *int
 }
 type UDPArgs struct {
 	Args
